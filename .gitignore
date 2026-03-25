@@ -1,0 +1,25 @@
+# Global dependency and build artifacts
+**/node_modules/
+
+# Python virtual environments and caches
+**/.venv/
+**/__pycache__/
+*.pyc
+
+# Common env files
+.env
+.env.*
+
+# Frontend build outputs
+**/.next/
+**/dist/
+**/build/
+
+# Logs
+*.log
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
