@@ -4,9 +4,25 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import RepoChatbot from "../components/RepoChatbot";
 
 // ── PlantUML encoding (raw DEFLATE + custom base64 via Web Compression API) ──
 const PUML_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_";
+
+const PLANTUML_EDGE_PATTERN = /(-+>|<-+|\.+>|<\.+|<\|--|--\|>)/;
+const PLANTUML_NODE_KINDS = [
+  "actor",
+  "component",
+  "database",
+  "queue",
+  "class",
+  "interface",
+  "entity",
+  "participant",
+  "boundary",
+  "control",
+  "collections",
+];
 
 function pumlBase64(data: Uint8Array): string {
   let out = "";
@@ -43,13 +59,156 @@ async function encodePlantUML(source: string): Promise<string> {
   return pumlBase64(compressed);
 }
 
+function toSafeAlias(raw: string): string {
+  let alias = raw.replace(/[^A-Za-z0-9_]/g, "_");
+  if (!alias) {
+    alias = "Node";
+  }
+  if (/^[0-9]/.test(alias)) {
+    alias = `N_${alias}`;
+  }
+  return alias;
+}
+
+function defaultNodeForKind(kind: string): { label: string; alias: string } {
+  const defaults: Record<string, { label: string; alias: string }> = {
+    actor: { label: "User", alias: "UserNode" },
+    component: { label: "Component", alias: "ComponentNode" },
+    database: { label: "Database", alias: "DatabaseNode" },
+    queue: { label: "Queue", alias: "QueueNode" },
+    class: { label: "Class", alias: "ClassNode" },
+    interface: { label: "Interface", alias: "InterfaceNode" },
+    entity: { label: "Entity", alias: "EntityNode" },
+    participant: { label: "Participant", alias: "ParticipantNode" },
+    boundary: { label: "Boundary", alias: "BoundaryNode" },
+    control: { label: "Control", alias: "ControlNode" },
+    collections: { label: "Collection", alias: "CollectionNode" },
+  };
+
+  return defaults[kind] ?? { label: "Node", alias: "NodeAlias" };
+}
+
+function sanitizePlantUMLSource(source: string): string {
+  const withoutFences = source
+    .replace(/```(?:plantuml|uml)?/gi, "")
+    .replace(/```/g, "")
+    .trim();
+
+  const rawLines = withoutFences.split(/\r?\n/);
+  const aliasMap = new Map<string, string>();
+  const output: string[] = [];
+
+  for (const rawLine of rawLines) {
+    const line = rawLine.trim();
+    if (!line) {
+      output.push(rawLine);
+      continue;
+    }
+
+    const lowered = line.toLowerCase();
+    if (lowered === "@startuml" || lowered === "@enduml" || lowered.startsWith("skinparam ")) {
+      output.push(rawLine);
+      continue;
+    }
+
+    const kind = PLANTUML_NODE_KINDS.find((k) => lowered === k || lowered.startsWith(`${k} `));
+    if (!kind) {
+      output.push(rawLine);
+      continue;
+    }
+
+    const rest = line.slice(kind.length).trim();
+    if (!rest) {
+      const fallback = defaultNodeForKind(kind);
+      output.push(`${kind} "${fallback.label}" as ${fallback.alias}`);
+      continue;
+    }
+
+    if (rest.includes("{") || rest.includes("}")) {
+      output.push(rawLine);
+      continue;
+    }
+
+    if (rest.includes(" as ") || rest.startsWith('"') || rest.startsWith("'")) {
+      output.push(rawLine);
+      continue;
+    }
+
+    if (PLANTUML_EDGE_PATTERN.test(rest) || rest.includes(":")) {
+      output.push(rawLine);
+      continue;
+    }
+
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(rest)) {
+      output.push(rawLine);
+      continue;
+    }
+
+    const alias = toSafeAlias(rest);
+    aliasMap.set(rest, alias);
+    output.push(`${kind} "${rest}" as ${alias}`);
+  }
+
+  const rewritten = output.map((line) => {
+    if (!PLANTUML_EDGE_PATTERN.test(line)) {
+      return line;
+    }
+
+    let next = line;
+    for (const [raw, alias] of aliasMap.entries()) {
+      if (!raw) continue;
+      const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(escaped, "g");
+      next = next.replace(regex, alias);
+    }
+    return next;
+  });
+
+  let normalized = rewritten.join("\n").trim();
+  if (!/@startuml/i.test(normalized)) {
+    normalized = `@startuml\n${normalized}\n@enduml`;
+  }
+  if (!/@enduml/i.test(normalized)) {
+    normalized = `${normalized}\n@enduml`;
+  }
+
+  return normalized;
+}
+
+function enforceVerticalTreeLayout(source: string, heading: string): string {
+  const isSystemComponents = heading.toLowerCase().includes("system components");
+  if (!isSystemComponents) {
+    return source;
+  }
+
+  if (!/@startuml/i.test(source)) {
+    return source;
+  }
+
+  const needsDirection = !/top to bottom direction/i.test(source) && !/left to right direction/i.test(source);
+  const needsLineType = !/skinparam\s+linetype\s+ortho/i.test(source);
+  const needsNodeSep = !/skinparam\s+nodesep/i.test(source);
+  const needsRankSep = !/skinparam\s+ranksep/i.test(source);
+
+  if (!needsDirection && !needsLineType && !needsNodeSep && !needsRankSep) {
+    return source;
+  }
+
+  const hints: string[] = [];
+  if (needsDirection) hints.push("top to bottom direction");
+  if (needsLineType) hints.push("skinparam linetype ortho");
+  if (needsNodeSep) hints.push("skinparam nodesep 40");
+  if (needsRankSep) hints.push("skinparam ranksep 70");
+
+  return source.replace(/@startuml\s*/i, `@startuml\n${hints.join("\n")}\n`);
+}
+
 type TopicKey =
   | "Purpose and Scope"
   | "Repository Layout"
   | "Source Layer"
   | "Tech Stack"
-  | "Architecture Text"
-  | "Architecture Diagram"
+  | "Architecture"
   | "RPC Protocol";
 
 type TopicMap = Record<TopicKey, string>;
@@ -73,8 +232,7 @@ const TOPICS: Array<{ key: TopicKey; label: string }> = [
   { key: "Repository Layout", label: "Repository Layout" },
   { key: "Source Layer", label: "Source Layer" },
   { key: "Tech Stack", label: "Tech Stack" },
-  { key: "Architecture Text", label: "Architecture Text" },
-  { key: "Architecture Diagram", label: "Architecture Diagram" },
+  { key: "Architecture", label: "Architecture" },
   { key: "RPC Protocol", label: "RPC Protocol" },
 ];
 
@@ -85,8 +243,7 @@ const EMPTY_ANALYSIS_DATA: TopicMap = {
   "Repository Layout": EMPTY_CONTENT,
   "Source Layer": EMPTY_CONTENT,
   "Tech Stack": EMPTY_CONTENT,
-  "Architecture Text": EMPTY_CONTENT,
-  "Architecture Diagram": EMPTY_CONTENT,
+  "Architecture": EMPTY_CONTENT,
   "RPC Protocol": EMPTY_CONTENT,
 };
 
@@ -96,27 +253,34 @@ function toTopicMap(payload: AnalysisApiResponse): TopicMap {
     "Repository Layout": payload.repo_layout || EMPTY_CONTENT,
     "Source Layer": payload.source_layer || EMPTY_CONTENT,
     "Tech Stack": payload.tech_stack || EMPTY_CONTENT,
-    "Architecture Text": payload.architecture_text || EMPTY_CONTENT,
-    "Architecture Diagram": payload.architecture_diagram || EMPTY_CONTENT,
+    "Architecture": payload.architecture_text || EMPTY_CONTENT,
     "RPC Protocol": payload.rpc_protocol || EMPTY_CONTENT,
   };
 }
 
-function extractPlantUMLSource(content: string): string | null {
-  // Fenced code block: ```plantuml or ```uml
-  const fenced = content.match(/```(?:plantuml|uml)\s*([\s\S]*?)```/i);
-  if (fenced?.[1]?.trim()) {
-    const src = fenced[1].trim();
-    return src.startsWith("@startuml") ? src : `@startuml\n${src}\n@enduml`;
+function extractPlantUMLSources(content: string): string[] {
+  const results: string[] = [];
+
+  const fencedPattern = /```(?:plantuml|uml)\s*([\s\S]*?)```/gi;
+  for (const match of content.matchAll(fencedPattern)) {
+    const src = match[1]?.trim();
+    if (!src) continue;
+    const wrapped = src.startsWith("@startuml") ? src : `@startuml\n${src}\n@enduml`;
+    results.push(sanitizePlantUMLSource(wrapped));
   }
 
-  // Raw @startuml...@enduml block anywhere in content
-  const raw = content.match(/@startuml[\s\S]*?@enduml/i);
-  if (raw?.[0]?.trim()) {
-    return raw[0].trim();
+  if (results.length > 0) {
+    return results;
   }
 
-  return null;
+  const rawPattern = /@startuml[\s\S]*?@enduml/gi;
+  for (const match of content.matchAll(rawPattern)) {
+    if (match[0]?.trim()) {
+      results.push(sanitizePlantUMLSource(match[0].trim()));
+    }
+  }
+
+  return results;
 }
 
 function stripPlantUMLBlocks(content: string): string {
@@ -124,6 +288,49 @@ function stripPlantUMLBlocks(content: string): string {
     .replace(/```(?:plantuml|uml)\s*[\s\S]*?```/gi, "")
     .replace(/@startuml[\s\S]*?@enduml/gi, "")
     .trim();
+}
+
+type ArchitectureSection = {
+  id: string;
+  heading: string;
+  content: string;
+  diagrams: string[];
+  textOnly: string;
+};
+
+function splitArchitectureSections(content: string): ArchitectureSection[] {
+  const sections: ArchitectureSection[] = [];
+  const sectionPattern = /(^##\s+.*$[\s\S]*?)(?=^##\s+.*$|\Z)/gm;
+
+  const matches = Array.from(content.matchAll(sectionPattern));
+  if (matches.length === 0) {
+    const diagrams = extractPlantUMLSources(content);
+    return [{
+      id: "architecture-fallback",
+      heading: "Architecture",
+      content,
+      diagrams,
+      textOnly: stripPlantUMLBlocks(content),
+    }];
+  }
+
+  for (let index = 0; index < matches.length; index += 1) {
+    const sectionContent = matches[index][1].trim();
+    const firstLine = sectionContent.split("\n", 1)[0].trim();
+    const heading = firstLine.replace(/^##\s+/, "") || `Section ${index + 1}`;
+    const diagrams = extractPlantUMLSources(sectionContent).map((diagram) =>
+      enforceVerticalTreeLayout(diagram, heading),
+    );
+    sections.push({
+      id: `architecture-section-${index + 1}`,
+      heading,
+      content: sectionContent,
+      diagrams,
+      textOnly: stripPlantUMLBlocks(sectionContent),
+    });
+  }
+
+  return sections;
 }
 
 
@@ -150,9 +357,16 @@ const markdownComponents: Components = {
 function PlantUMLDiagram({ chart, format, title }: { chart: string; format: DiagramFormat; title: string }) {
   const [svgUrl, setSvgUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [zoomLevel, setZoomLevel] = useState(1);
+  const minZoom = 0.5;
+  const maxZoom = 2.5;
+  const zoomStep = 0.1;
+
+  const clampZoom = (value: number) => Math.min(maxZoom, Math.max(minZoom, value));
 
   useEffect(() => {
     let active = true;
+    setZoomLevel(1);
 
     encodePlantUML(chart)
       .then((encoded) => {
@@ -170,14 +384,43 @@ function PlantUMLDiagram({ chart, format, title }: { chart: string; format: Diag
 
   return (
     <div className="analysis-diagram-wrap">
+      <div className="analysis-diagram-toolbar" role="group" aria-label="Diagram controls">
+        <button
+          type="button"
+          className="analysis-format-btn"
+          onClick={() => setZoomLevel((current) => clampZoom(current + zoomStep))}
+          aria-label="Zoom in"
+        >
+          +
+        </button>
+        <button
+          type="button"
+          className="analysis-format-btn"
+          onClick={() => setZoomLevel((current) => clampZoom(current - zoomStep))}
+          aria-label="Zoom out"
+        >
+          -
+        </button>
+        <button
+          type="button"
+          className="analysis-format-btn"
+          onClick={() => setZoomLevel(1)}
+          aria-label="Reset zoom"
+        >
+          Reset
+        </button>
+      </div>
       {error ? <p className="analysis-state error">{error}</p> : null}
       {svgUrl ? (
-        <img
-          src={svgUrl}
+        <div className="analysis-diagram-scroll">
+          <img
+            src={svgUrl}
             alt={title}
-          className="analysis-diagram-img"
-          onError={() => setError("Failed to render diagram from PlantUML server. Check your network or diagram syntax.")}
-        />
+            className="analysis-diagram-img"
+            style={{ transform: `scale(${zoomLevel})`, transformOrigin: "top center" }}
+            onError={() => setError("Failed to render diagram from PlantUML server. Check your network or diagram syntax.")}
+          />
+        </div>
       ) : null}
     </div>
   );
@@ -191,12 +434,12 @@ export default function AnalysisPage() {
   const [analysisData, setAnalysisData] = useState<TopicMap>(EMPTY_ANALYSIS_DATA);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [diagramFormat, setDiagramFormat] = useState<DiagramFormat>("svg");
-
+  const diagramFormat: DiagramFormat = "svg";
   const activeContent = normalizeMarkdown(analysisData[selectedTopic] || EMPTY_CONTENT);
-  const plantUMLSource = useMemo(() => extractPlantUMLSource(activeContent), [activeContent]);
-  const cleanedContent = useMemo(() => stripPlantUMLBlocks(activeContent), [activeContent]);
-  const isDiagramTopic = selectedTopic === "Architecture Diagram" || selectedTopic === "Repository Layout";
+  const architectureSections = useMemo(
+    () => (selectedTopic === "Architecture" ? splitArchitectureSections(activeContent) : []),
+    [activeContent, selectedTopic],
+  );
 
   useEffect(() => {
     if (!repoUrl) {
@@ -221,7 +464,19 @@ export default function AnalysisPage() {
         });
 
         if (!response.ok) {
-          const message = "Failed to fetch analysis from backend.";
+          let message = "Failed to fetch analysis from backend.";
+          try {
+            const payload = (await response.json()) as { detail?: string };
+            if (payload.detail) {
+              message = payload.detail;
+            }
+          } catch {
+            const body = await response.text();
+            if (body.trim()) {
+              message = body.trim();
+            }
+          }
+
           throw new Error(message);
         }
 
@@ -261,54 +516,61 @@ export default function AnalysisPage() {
         </aside>
 
         <article className="analysis-content" aria-live="polite">
-         
-          {loading ? <p className="analysis-state">Checking database and generating analysis if needed...</p> : null}
+          {loading ? (
+            <div className="analysis-loader" role="status" aria-live="polite" aria-busy="true">
+              <div className="analysis-spinner" aria-hidden="true" />
+              <p className="analysis-loader-text">Loading repository analysis...</p>
+              <p className="analysis-loader-subtext">Checking cache, cloning the repo if needed, and generating results.</p>
+            </div>
+          ) : null}
           {error ? <p className="analysis-state error">{error}</p> : null}
 
-          <div className={`analysis-text ${isDiagramTopic ? "diagram-mode" : ""}`}>
-            {isDiagramTopic && plantUMLSource ? (
-              <>
-                <div className="analysis-diagram-toolbar" role="group" aria-label="Diagram format">
-                  <button
-                    type="button"
-                    className={`analysis-format-btn ${diagramFormat === "svg" ? "active" : ""}`}
-                    onClick={() => setDiagramFormat("svg")}
-                  >
-                    SVG
-                  </button>
-                  <button
-                    type="button"
-                    className={`analysis-format-btn ${diagramFormat === "png" ? "active" : ""}`}
-                    onClick={() => setDiagramFormat("png")}
-                  >
-                    PNG
-                  </button>
-                </div>
-                <PlantUMLDiagram
-                  chart={plantUMLSource}
-                  format={diagramFormat}
-                  title={selectedTopic}
-                />
-              </>
-            ) : null}
+          {!loading ? (
+            <div className="analysis-text">
+              {selectedTopic === "Architecture" ? (
+                <div className="analysis-architecture-sections">
+                  {architectureSections.map((section, sectionIndex) => (
+                    <section key={section.id} className="analysis-architecture-section">
+                      <div className="analysis-markdown">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                          {section.textOnly}
+                        </ReactMarkdown>
+                      </div>
 
-            {isDiagramTopic && plantUMLSource ? (
-              cleanedContent ? (
-                <div className="analysis-markdown diagram-notes">
+                      {section.diagrams.length > 0 ? (
+                        <div className="analysis-diagram-stack">
+                          {section.diagrams.map((diagram, diagramIndex) => (
+                            <PlantUMLDiagram
+                              key={`${section.id}-diagram-${diagramIndex}`}
+                              chart={diagram}
+                              format={diagramFormat}
+                              title={`${section.heading} - Diagram ${diagramIndex + 1}`}
+                            />
+                          ))}
+                        </div>
+                      ) : null}
+                    </section>
+                  ))}
+                </div>
+              ) : (
+                <div className="analysis-markdown">
                   <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                    {cleanedContent}
+                    {activeContent}
                   </ReactMarkdown>
                 </div>
-              ) : null
-            ) : (
-              <div className="analysis-markdown">
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                  {activeContent}
-                </ReactMarkdown>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          ) : null}
         </article>
+      </div>
+
+      <div className="analysis-chatbot-bottom">
+        <RepoChatbot
+          repoUrl={repoUrl}
+          analysisData={analysisData}
+          disabled={loading}
+          openInNewPageOnFirstSend
+        />
       </div>
     </section>
   );

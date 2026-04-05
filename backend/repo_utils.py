@@ -1,5 +1,13 @@
-from git import Repo
+import hashlib
 import os
+import shutil
+from pathlib import Path
+from urllib.parse import urlparse, urlunparse
+
+from git import Repo
+
+
+CACHE_DIR = Path(__file__).resolve().parent.parent / "temp_dir"
 
 
 SKIP_DIRS = {
@@ -33,18 +41,85 @@ SKIP_EXTENSIONS = {
 }
 
 MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024
+
+
+def _normalize_repo_source(path):
+    raw = (path or "").strip()
+    if not raw:
+        return raw
+
+    parsed = urlparse(raw)
+    if parsed.scheme in {"http", "https", "git", "ssh"}:
+        cleaned = parsed._replace(query="", fragment="")
+        normalized = urlunparse(cleaned).rstrip("/")
+        return normalized
+
+    return str(Path(raw).expanduser().resolve())
+
+
+def _repo_cache_name(path):
+    parsed = urlparse(path)
+    if parsed.scheme in {"http", "https", "git", "ssh"}:
+        pieces = [piece for piece in parsed.path.split("/") if piece]
+        owner = pieces[-2] if len(pieces) >= 2 else "repo"
+        repo = pieces[-1].replace(".git", "") if pieces else "repo"
+        base_name = f"{owner}__{repo}" or "repo"
+    else:
+        base_name = os.path.basename(path.rstrip(os.sep)) or "repo"
+
+    safe_base = "".join(character if character.isalnum() or character in {"-", "_", "."} else "_" for character in base_name)
+    digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:10]
+    return f"{safe_base[:60]}_{digest}"
+
+
+def _repo_cache_path(path):
+    return CACHE_DIR / _repo_cache_name(path)
+
+
+def _repo_has_files(local_path):
+    for root, dirs, files in os.walk(local_path):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        if files:
+            return True
+
+    return False
+
+
+def _is_ready_repo(local_path):
+    return local_path.exists() and (local_path / ".git").exists() and _repo_has_files(local_path)
+
+
+def prepare_repo(path):
+    normalized_path = _normalize_repo_source(path)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    local_path = _repo_cache_path(normalized_path)
+    if _is_ready_repo(local_path):
+        print(f"Repository already exists at {local_path}, reusing it.")
+        return {
+            "repo": Repo(str(local_path)),
+            "local_path": str(local_path),
+            "reused": True,
+        }
+
+    if local_path.exists():
+        shutil.rmtree(local_path, ignore_errors=True)
+
+    print(f"Cloning repository into {local_path}")
+    repo = Repo.clone_from(normalized_path, str(local_path))
+    return {
+        "repo": repo,
+        "local_path": str(local_path),
+        "reused": False,
+    }
+
+
 def get_repo(path):
-    print(f"Attempting to initialize repository at path: {path}")
     try:
-        temp_dir = "temp_dir"
-        repo_name = path.split("/")[-1].replace(".git", "")
-        local_path= os.path.join(temp_dir, repo_name)
-        if os.path.exists(local_path):
-            print(f"Repository already exists at {local_path}, reusing it.")
-            return Repo(local_path)
-        repo_path = os.path.join(temp_dir, repo_name)
-        repo = Repo.clone_from(path, repo_path)
-        return repo
+        normalized_path = _normalize_repo_source(path)
+        print(f"Attempting to initialize repository at path: {normalized_path}")
+        prepared = prepare_repo(normalized_path)
+        return prepared["repo"]
     except Exception as e:
         print(f"Error occurred while initializing repository: {e}")
         return None

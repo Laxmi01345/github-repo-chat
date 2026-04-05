@@ -1,0 +1,10 @@
+fastapi
+pydantic
+uvicorn[standard]
+python-dotenv
+cerebras_cloud_sdk
+sentence-transformers
+numpy
+faiss-cpu
+GitPython
+psycopg2-binary

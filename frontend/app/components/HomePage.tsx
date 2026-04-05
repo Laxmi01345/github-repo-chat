@@ -6,14 +6,54 @@ import { useState } from "react";
 export default function HomePage() {
   const router = useRouter();
   const [url, setUrl] = useState("");
+  const [isPreparing, setIsPreparing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleAnalyze = () => {
+  const handleAnalyze = async () => {
     const repoUrl = url.trim();
     if (!repoUrl) {
       return;
     }
 
-    router.push(`/analysis?repo_url=${encodeURIComponent(repoUrl)}`);
+    setIsPreparing(true);
+    setError(null);
+
+    const apiUrl = process.env.NEXT_PUBLIC_ANALYSIS_API_URL || "http://localhost:8000/analysis";
+    const prepareUrl = apiUrl.replace(/\/analysis\/?$/, "/prepare");
+
+    try {
+      const response = await fetch(prepareUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ repo_url: repoUrl }),
+      });
+
+      if (!response.ok) {
+        let message = "Failed to prepare repository.";
+
+        try {
+          const payload = (await response.json()) as { detail?: string };
+          if (payload.detail) {
+            message = payload.detail;
+          }
+        } catch {
+          const body = await response.text();
+          if (body.trim()) {
+            message = body.trim();
+          }
+        }
+
+        throw new Error(message);
+      }
+
+      router.push(`/analysis?repo_url=${encodeURIComponent(repoUrl)}`);
+    } catch (prepareError) {
+      setError(prepareError instanceof Error ? prepareError.message : "Unexpected error while preparing repository.");
+    } finally {
+      setIsPreparing(false);
+    }
   };
 
   return (
@@ -42,16 +82,35 @@ export default function HomePage() {
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             aria-label="GitHub repository URL"
+            disabled={isPreparing}
           />
         </div>
         <button
           className="hero-btn"
           onClick={handleAnalyze}
-          disabled={!url.trim()}
+          disabled={!url.trim() || isPreparing}
+          aria-busy={isPreparing}
         >
-          Analyze
+          {isPreparing ? (
+            <span className="hero-btn-loading">
+              <span className="hero-btn-spinner" aria-hidden="true" />
+              Preparing repo
+            </span>
+          ) : (
+            "Analyze"
+          )}
         </button>
       </div>
+
+      {isPreparing ? (
+        <div className="hero-loader" role="status" aria-live="polite" aria-busy="true">
+          <div className="analysis-spinner" aria-hidden="true" />
+          <p className="hero-loader-title">Cloning repository...</p>
+          <p className="hero-loader-text">This can take a moment for larger repos. The analysis screen will open when it is ready.</p>
+        </div>
+      ) : null}
+
+      {error ? <p className="hero-error">{error}</p> : null}
 
       <ul className="hero-features">
         <li className="hero-feature-chip">

@@ -5,7 +5,7 @@ def get_connection():
     return psycopg2.connect(
         dbname="repo_analysis_db",
         user="postgres",
-        password="Laxmi013@",
+        password="postgres",
         host="localhost",
         port="5432"
     )

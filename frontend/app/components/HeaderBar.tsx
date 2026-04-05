@@ -37,21 +37,6 @@ export default function HeaderBar() {
   };
 
   const handleShare = async () => {
-    const shareData = {
-      title: "RepoLens",
-      text: "Check out RepoLens",
-      url: window.location.href,
-    };
-
-    if (navigator.share) {
-      try {
-        await navigator.share(shareData);
-        return;
-      } catch {
-        // Fall back to copy if share is cancelled or fails.
-      }
-    }
-
     try {
       await navigator.clipboard.writeText(window.location.href);
       setCopied(true);
