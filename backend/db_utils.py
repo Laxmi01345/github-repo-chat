@@ -1,14 +1,23 @@
+import os
 import psycopg2
 
 
 def get_connection():
-    return psycopg2.connect(
-        dbname="repo_analysis_db",
-        user="postgres",
-        password="postgres",
-        host="localhost",
-        port="5432"
-    )
+    # Use DATABASE_URL if provided (standard format), otherwise use individual env vars
+    database_url = os.getenv("DATABASE_URL")
+    
+    if database_url:
+        # Format: postgresql://user:password@host:port/dbname
+        return psycopg2.connect(database_url)
+    else:
+        # Fallback to individual environment variables
+        return psycopg2.connect(
+            dbname=os.getenv("DB_NAME", "repo_analysis_db"),
+            user=os.getenv("DB_USER", "postgres"),
+            password=os.getenv("DB_PASSWORD", "postgres"),
+            host=os.getenv("DB_HOST", "localhost"),
+            port=os.getenv("DB_PORT", "5432")
+        )
 
 
 def ensure_schema(cursor):

@@ -14,7 +14,7 @@
 **/.next/
 **/dist/
 **/build/
-
+backend/temp_dir
 # Logs
 *.log
 
